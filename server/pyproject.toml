@@ -1,0 +1,42 @@
+[project]
+name = "nyaymitra"
+version = "0.1.0"
+description = ""
+authors = [{name = "" }]
+maintainers = [
+    {name = "Mohammed Owais", email = "mohammedowais.dev@gmail.com"},
+    {name = "Mohammed Sufiyan B", email = "mdsufyan.b.2020@gmail.com"},
+    {name = "Praveen Bilgundi", email = "bilgundipraveen@gmail.com"},
+    {name = "Punith K.V", email = "punithkv54@gmail.com"},
+]
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "chroma-hnswlib==0.7.6",
+    "chromadb==0.5.11",
+    "python-dotenv==1.0.0",
+    "pymupdf==1.24.9",
+    "pymupdfb==1.24.9",
+    "ipykernel>=6.30.1",
+    "langchain==0.3.27",
+    "langchain-chroma==0.1.4",
+    "langchain-community==0.3.21",
+    "langchain-core==0.3.79",
+    "langchain-google-genai==2.0.10",
+    "langchain-text-splitters==0.3.11",
+    "langchainhub==0.1.20",
+    "langdetect==1.0.9",
+    "langsmith==0.3.45",
+    "google-generativeai==0.8.5",
+    "redis>=6.3.0",
+    "fastapi==0.115.0",
+    "uvicorn==0.30.6",
+    "jupyter>=1.1.1",
+    "supabase>=2.27.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "ruff>=0.11.0",
+]
