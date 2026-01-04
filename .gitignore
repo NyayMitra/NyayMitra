@@ -36,3 +36,5 @@ server/__pycache__/
 server/*.pyc
 server/*.pyo
 server/*.pyd
+
+Ingested pdfs/*
