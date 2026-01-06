@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useLocation } from "react-router-dom";
+import { useLocation, Link } from "react-router-dom";
 import { HashLink } from "react-router-hash-link";
 import { Button } from "./ui/button";
 import Logo from "./Logo";
@@ -51,12 +51,16 @@ const Navbar = () => {
           </div>
 
           <div className="hidden md:flex items-center gap-3">
-            <Button className="bg-[#2323FF] hover:bg-[#2323FF]/80 text-white rounded-full w-24 py-5">
-              Sign Up
-            </Button>
-            <Button className="bg-primary hover:bg-primary/80 text-white rounded-full w-24 py-5">
-              Log In
-            </Button>
+            <Link to="/sign-up">
+              <Button className="bg-[#2323FF] hover:bg-[#2323FF]/80 text-white rounded-full w-24 py-5">
+                Sign Up
+              </Button>
+            </Link>
+            <Link to="/sign-in">
+              <Button className="bg-primary hover:bg-primary/80 text-white rounded-full w-24 py-5">
+                Log In
+              </Button>
+            </Link>
           </div>
 
           <button
@@ -97,16 +101,18 @@ const Navbar = () => {
           Chat
         </HashLink>
 
-        <Button
-          onClick={() => setMenuOpen(false)}
-          className="bg-[#2323FF] hover:bg-[#2323FF]/80 w-48 py-4 rounded-full text-lg" >
-          Sign Up
-        </Button>
-        <Button
-          onClick={() => setMenuOpen(false)}
-          className="bg-primary hover:bg-primary/80 w-48 py-4 rounded-full text-lg" >
-          Log In
-        </Button>
+        <Link to="/sign-up" onClick={() => setMenuOpen(false)}>
+          <Button
+            className="bg-[#2323FF] hover:bg-[#2323FF]/80 w-48 py-4 rounded-full text-lg" >
+            Sign Up
+          </Button>
+        </Link>
+        <Link to="/sign-in" onClick={() => setMenuOpen(false)}>
+          <Button
+            className="bg-primary hover:bg-primary/80 w-48 py-4 rounded-full text-lg" >
+            Log In
+          </Button>
+        </Link>
       </div>
     </>
   );
