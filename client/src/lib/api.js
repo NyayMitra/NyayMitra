@@ -29,22 +29,40 @@ export async function healthCheck() {
   return request("/health");
 }
 
-export async function chat(query, session_id) {
+export async function createChat(user_id, title = "New Chat") {
+    return request("/api/chats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id, title }),
+    });
+}
+
+export async function getChats(user_id) {
+    return request(`/api/chats?user_id=${encodeURIComponent(user_id)}`);
+}
+
+export async function deleteChat(chat_id) {
+    return request(`/api/chats/${encodeURIComponent(chat_id)}`, {
+        method: "DELETE",
+    });
+}
+
+export async function chat(query, chat_id, user_id) {
   return request("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, session_id }),
+    body: JSON.stringify({ query, chat_id, user_id }),
   });
 }
 
-export async function* chatStream(query, sessionId) {
+export async function* chatStream(query, chatId, userId) {
   try {
     const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query, session_id: sessionId, use_agentic: false }),
+      body: JSON.stringify({ query, chat_id: chatId, user_id: userId }),
     });
 
     if (!response.ok) {
@@ -59,29 +77,83 @@ export async function* chatStream(query, sessionId) {
       const { value, done } = await reader.read();
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
+      // Normalize line endings to \n only
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      
+      // Split by double newline (SSE message separator)
       const lines = buffer.split("\n\n");
       buffer = lines.pop() || "";
 
       for (const line of lines) {
+        // Skip empty lines
+        if (!line.trim()) continue;
+        
+        console.log("Stream Line (raw):", JSON.stringify(line));
+        console.log("Starts with 'data: '?", line.startsWith("data: "));
+        
         if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-          if (data === "[DONE]") return;
+          const data = line.slice(6).trim();
+          console.log("Extracted data:", data);
+          
+          if (data === "[DONE]") {
+            yield { done: true };
+            return;
+          }
 
           try {
             const parsed = JSON.parse(data);
-            yield parsed;
+            console.log("Parsed SSE:", parsed);
+            
+            if (parsed.content && typeof parsed.content === 'string' && parsed.content.trim().startsWith('data: {')) {
+              console.warn("Detected double-wrapped SSE, unwrapping...");
+              try {
+                const innerData = parsed.content.trim().slice(6).trim();
+                const innerParsed = JSON.parse(innerData);
+                console.log("Unwrapped inner data:", innerParsed);
+                
+                if (innerParsed.status) {
+                  console.log("Yielding unwrapped status:", innerParsed.status);
+                  yield { status: innerParsed.status };
+                  continue;
+                } else if (innerParsed.content) {
+                  console.log("Yielding unwrapped content");
+                  yield { content: innerParsed.content };
+                } else if (innerParsed.error) {
+                  yield { error: innerParsed.error, done: true };
+                }
+                continue;
+              } catch (unwrapError) {
+                console.error("Failed to unwrap, treating as normal content:", unwrapError);
+              }
+            }
+            
+            if (parsed.status) {
+              console.log("Yielding status:", parsed.status);
+              yield { status: parsed.status };
+              continue;
+            } else if (parsed.content) {
+              console.log("Yielding content chunk");
+              yield { content: parsed.content };
+            } else if (parsed.error) {
+              yield { error: parsed.error, done: true };
+            }
           } catch (e) {
-            console.error("Error parsing SSE data:", e);
+            console.error("Error parsing SSE data:", e, "Raw data:", data);
           }
+        } else {
+          console.warn("Line does NOT start with 'data: ', treating as raw content:", line);
         }
       }
     }
+    
+    // Signal completion if we exit normally
+    yield { done: true };
   } catch (error) {
+    console.error("Stream error:", error);
     yield { error: error.message, done: true };
   }
 }
 
-export async function getHistory(session_id) {
-  return request(`/api/history/${encodeURIComponent(session_id)}`);
+export async function getHistory(chat_id) {
+  return request(`/api/history/${encodeURIComponent(chat_id)}`);
 }

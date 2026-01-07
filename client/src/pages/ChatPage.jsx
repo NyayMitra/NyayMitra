@@ -6,43 +6,28 @@ import { dracula } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { Button } from "../components/ui/button";
 import Sidebar from "../components/Sidebar";
 import { Send, Loader2, Mic } from "lucide-react";
+import { useUser } from "@clerk/clerk-react";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import {
   healthCheck as apiHealthCheck,
-  chat as apiChat,
   chatStream,
   getHistory as apiGetHistory,
+  createChat,
 } from "../lib/api";
 
 const ChatPage = () => {
+  const { user } = useUser();
+  const { chatId } = useParams();
+  const navigate = useNavigate();
+
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  const [streamingResponse, setStreamingResponse] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const API_BASE_URL =
-    import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
-  const [connectionStatus, setConnectionStatus] = useState("unknown"); // 'unknown'|'healthy'|'unreachable'
-  const [recents, setRecents] = useState([
-    {
-      id: 1,
-      title: "Chat information asked",
-      preview: "Recent conversation...",
-    },
-  ]);
-  const [activeChat, setActiveChat] = useState("new");
+
+  const [connectionStatus, setConnectionStatus] = useState("unknown");
   const messagesEndRef = useRef(null);
   const recognitionRef = useRef(null);
-
-  const sessionId = useState(() => {
-    const stored = localStorage.getItem("sessionId");
-    if (stored) return stored;
-    const newSession = `session_${Date.now()}_${Math.random()
-      .toString(36)
-      .substr(2, 9)}`;
-    localStorage.setItem("sessionId", newSession);
-    return newSession;
-  })[0];
 
   const handleSendMessage = async (messageText) => {
     if (!messageText.trim() || isLoading) return;
@@ -52,6 +37,33 @@ const ChatPage = () => {
       role: "user",
       content: messageText,
     };
+
+    let currentChatId = chatId;
+
+    // If no chat id, create one first
+    if (!currentChatId) {
+      try {
+        const title =
+          messageText.length > 30
+            ? messageText.slice(0, 30) + "..."
+            : messageText;
+        const newChat = await createChat(user.id, title);
+        currentChatId = newChat.id;
+
+        // dispatch event for sidebar
+        setTimeout(() => {
+          window.dispatchEvent(
+            new CustomEvent("chat-created", { detail: newChat })
+          );
+        }, 100);
+      } catch (e) {
+        console.error("Failed to create chat on send:", e);
+        alert(`Error creating chat: ${e.message}`);
+        setIsLoading(false);
+        return;
+      }
+    }
+
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setIsLoading(true);
@@ -70,32 +82,66 @@ const ChatPage = () => {
     let fullContent = "";
 
     try {
-      console.log("Starting stream...");
+      console.log("Starting stream for chat:", currentChatId);
 
-      for await (const chunk of chatStream(messageText, sessionId)) {
-        console.log("Chunk received:", chunk);
+      for await (const chunk of chatStream(
+        messageText,
+        currentChatId,
+        user.id
+      )) {
+        if (chunk.status) {
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantId ? { ...msg, status: chunk.status } : msg
+            )
+          );
+          continue;
+        }
 
         if (chunk.content) {
           fullContent += chunk.content;
 
           setMessages((prev) =>
             prev.map((msg) =>
-              msg.id === assistantId ? { ...msg, content: fullContent } : msg
+              msg.id === assistantId
+                ? { ...msg, content: fullContent, status: null }
+                : msg
             )
           );
         }
 
         if (chunk.done) {
-          console.log("Stream complete", fullContent);
-          // Finalize message
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantId
-                ? { ...msg, isStreaming: false, content: fullContent }
+                ? {
+                    ...msg,
+                    isStreaming: false,
+                    content: fullContent,
+                    status: null,
+                  }
                 : msg
             )
           );
           setConnectionStatus("healthy");
+
+          if(!chatId && currentChatId) {
+            navigate(`/chat/${currentChatId}`, {
+              replace: true,
+              state: {
+                initialMessage: null,
+                preservedMessages: [
+                  userMessage,
+                  {
+                    id: assistantId,
+                    role: "assistant",
+                    content: fullContent,
+                    created_at: new Date().toISOString(),
+                  },
+                ],
+              },
+            });
+          }
           break;
         }
       }
@@ -107,7 +153,7 @@ const ChatPage = () => {
             ? {
                 id: assistantId,
                 role: "assistant",
-                content: "Sorry, something went wrong. Please try again.",
+                content: "Sorry, something went wrong. Please try again",
                 isStreaming: false,
               }
             : msg
@@ -119,7 +165,7 @@ const ChatPage = () => {
     }
   };
 
-  // Initialize speech recognition
+  // speech recognition
   useEffect(() => {
     if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
       const SpeechRecognition =
@@ -165,25 +211,58 @@ const ChatPage = () => {
   };
 
   useEffect(() => {
+    // Clear input when switching chats
+    setInput("");
     scrollToBottom();
-  }, [messages]);
+  }, [chatId]);
 
   useEffect(() => {
     const loadHistory = async () => {
       try {
-        // run health check first
         const h = await apiHealthCheck();
         if (h?.status === "healthy") setConnectionStatus("healthy");
-
-        const data = await apiGetHistory(sessionId);
-        setMessages(data.messages || []);
-      } catch (error) {
-        console.error("Failed to load history or health check:", error);
+      } catch (e) {
         setConnectionStatus("unreachable");
+      }
+
+      if (!chatId) {
+        setMessages([]);
+        return;
+      }
+
+      if (location.state?.preservedMessages) {
+        console.log("Hydrating with preserved state");
+        setMessages(location.state.preservedMessages);
+        window.history.replaceState({}, document.title);
+      }
+      else if (location.state?.initialMessage) {
+        setMessages([location.state.initialMessage]);
+        window.history.replaceState({}, document.title);
+      }
+
+      try {
+        const data = await apiGetHistory(chatId);
+        if (data.messages && data.messages.length > 0) {
+          setMessages(data.messages);
+        }
+      } catch (error) {
+        console.error("Failed to load history:", error);
+        if (error.status === 404) {
+          if (
+            !location.state?.preservedMessages &&
+            !location.state?.initialMessage
+          ) {
+            setMessages([]);
+          }
+        }
       }
     };
     loadHistory();
-  }, [sessionId, API_BASE_URL]);
+  }, [chatId]);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, isLoading, isListening]);
 
   const sendMessage = async (e) => {
     e.preventDefault();
@@ -192,15 +271,10 @@ const ChatPage = () => {
 
   return (
     <div className="flex h-screen bg-black overflow-hidden">
-      <Sidebar
-        recents={recents}
-        setRecents={setRecents}
-        activeChat={activeChat}
-        setActiveChat={setActiveChat}
-      />
+      <Sidebar />
 
       <div className="flex-1 flex flex-col bg-gradient-to-b from-[#06102A] via-[#0a0f1f] to-black">
-        <div className="flex-1 overflow-y-auto px-8 py-12">
+        <div className="flex-1 overflow-y-auto px-8 py-12 custom-scrollbar">
           {/* Connection status indicator */}
           <div className="max-w-4xl mx-auto mb-6 flex justify-end items-center gap-3">
             <div className="flex items-center gap-2 text-sm text-gray-300">
@@ -232,7 +306,7 @@ const ChatPage = () => {
                 <p className="text-xl text-[#EFBF04] mb-8 animate-slide-up-delay">
                   "Your Friend of justice"
                 </p>
-                <p className="text-gray-400 max-w-md animate-slide-up-delay-2">
+                <p className="text-gray-400 max-w-md animate-slide-up-delay-2 mx-auto">
                   Ask me any legal questions related to Indian law. I can help
                   with the Constitution, Consumer Protection Act, IT Act, and
                   more.
@@ -244,7 +318,7 @@ const ChatPage = () => {
           <div className="max-w-4xl mx-auto space-y-6">
             {messages.map((message) => (
               <div
-                key={message.id}
+                key={message.id || Math.random()}
                 className={`flex ${
                   message.role === "user" ? "justify-end" : "justify-start"
                 }`}
@@ -260,15 +334,26 @@ const ChatPage = () => {
                       : ""
                   }`}
                 >
-                  {message.isStreaming && !message.content && (
-                    <div className="flex items-center space-x-3 py-4">
-                      <div className="flex space-x-1">
-                        <div className="w-3 h-3 bg-blue-400 rounded-full animate-bounce [animation-delay:0s]" />
-                        <div className="w-3 h-3 bg-blue-400 rounded-full animate-bounce [animation-delay:150ms]" />
-                        <div className="w-3 h-3 bg-blue-400 rounded-full animate-bounce [animation-delay:300ms]" />
+                  {message.isStreaming &&
+                    !message.content &&
+                    !message.status && (
+                      <div className="flex items-center space-x-3 py-4">
+                        <div className="flex space-x-1">
+                          <div className="w-3 h-3 bg-blue-400 rounded-full animate-bounce [animation-delay:0s]" />
+                          <div className="w-3 h-3 bg-blue-400 rounded-full animate-bounce [animation-delay:150ms]" />
+                          <div className="w-3 h-3 bg-blue-400 rounded-full animate-bounce [animation-delay:300ms]" />
+                        </div>
+                        <span className="text-blue-300 font-medium">
+                          Nyay Mitra is thinking...
+                        </span>
                       </div>
-                      <span className="text-blue-300 font-medium">
-                        Nyay Mitra is thinking...
+                    )}
+
+                  {message.status && !message.content && (
+                    <div className="flex items-center space-x-3 py-4 animate-pulse">
+                      <Loader2 className="h-5 w-5 text-[#EFBF04] animate-spin" />
+                      <span className="text-[#EFBF04] font-medium text-sm">
+                        {message.status}
                       </span>
                     </div>
                   )}
