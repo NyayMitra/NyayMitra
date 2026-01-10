@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -10,15 +10,13 @@ from main import NyayMitra
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import SupabaseVectorStore
-from supabase import create_client
-from langchain.schema import HumanMessage
-
+from supabase.client import create_client
+from langchain_core.messages import HumanMessage
 
 load_dotenv()
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s',
@@ -36,7 +34,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize the NyayMitra system with Gemini
 gemini_api_key = os.getenv('GOOGLE_API_KEY')
 if not gemini_api_key:
     raise ValueError("GOOGLE_API_KEY environment variable is not set")
@@ -59,26 +56,23 @@ vector_store = SupabaseVectorStore(
     client=supabase_client,
     embedding=embeddings,
     table_name="documents",
-    query_name="match_documents",
 )
 
-# Initialize NyayMitra
-nyay_mitra = NyayMitra(llm, embeddings, vector_store)
+nyay_mitra = NyayMitra(llm, embeddings, vector_store, supabase_client)
 
-# Pydantic models
+class CreateChatRequest(BaseModel):
+    user_id: str
+    title: str = "New Chat"
+
 class ChatRequest(BaseModel):
     query: str
-    session_id: str
+    chat_id: str
+    user_id: str = "anon"
 
 class ChatResponse(BaseModel):
     answer: str
-    session_id: str
+    chat_id: str
     messages: list
-
-class StreamChunk(BaseModel):
-    content: str
-    done: bool = False
-    session_id: str = ""
 
 class HealthResponse(BaseModel):
     status: str
@@ -89,11 +83,42 @@ async def health_check():
     """Health check endpoint"""
     return HealthResponse(status="healthy", message="Nyay Mitra API is running")
 
+@app.post("/api/chats")
+async def create_chat(request: CreateChatRequest):
+    """Create a new chat session for a user"""
+    try:
+        data = {
+            "user_id": request.user_id,
+            "title": request.title
+        }
+        res = supabase_client.table("chats").insert(data).execute()
+        if not res.data:
+            raise HTTPException(status_code=500, detail="Failed to create chat")
+        return res.data[0]
+    except Exception as e:
+        logging.error(f"Error creating chat: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/chats")
+async def list_chats(user_id: str):
+    """List all chats for a user"""
+    try:
+        res = supabase_client.table("chats")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .order("created_at", desc=True)\
+            .execute()
+        return res.data
+    except Exception as e:
+        logging.error(f"Error listing chats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """Chat endpoint for handling user queries"""
     try:
-        answer, messages = nyay_mitra.conversational(request.query, request.session_id)
+        # chat id as session_id
+        answer, messages = nyay_mitra.conversational(request.query, request.chat_id)
         
         formatted_messages = [
             {
@@ -105,7 +130,7 @@ async def chat(request: ChatRequest):
         
         return ChatResponse(
             answer=answer,
-            session_id=request.session_id,
+            chat_id=request.chat_id,
             messages=formatted_messages
         )
         
@@ -118,7 +143,7 @@ async def chat_stream(request: ChatRequest):
     async def event_generator():
         try:
             async for chunk in nyay_mitra.conversational_streaming(
-                request.query, request.session_id
+                request.query, request.chat_id
             ):
                 yield f"data: {json.dumps({'content': chunk})}\n\n"
             
@@ -141,15 +166,18 @@ async def chat_stream(request: ChatRequest):
         }
     )
 
-@app.get("/api/history/{session_id}")
-async def get_history(session_id: str):
+@app.get("/api/history/{chat_id}")
+async def get_history(chat_id: str):
     """Get chat history for a session"""
     try:
-        history_obj = nyay_mitra.get_session_history(session_id)
+        history_obj = nyay_mitra.get_session_history(chat_id)
+        if not history_obj:
+             raise HTTPException(status_code=404, detail="Chat not found")
+             
         messages = history_obj.messages
         
         return {
-            "session_id": session_id,
+            "chat_id": chat_id,
             "messages": [
                 {
                     "role": "user" if isinstance(msg, HumanMessage) else "assistant",
@@ -163,18 +191,15 @@ async def get_history(session_id: str):
         logging.error(f"Error in get_history endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/api/history/{session_id}")
-async def clear_history(session_id: str):
-    """Clear chat history for a session"""
+@app.delete("/api/chats/{chat_id}")
+async def delete_chat(chat_id: str):
+    """Delete a chat session"""
     try:
-        with nyay_mitra.store_lock:
-            if session_id in nyay_mitra.store:
-                del nyay_mitra.store[session_id]
-        
-        return {"message": "History cleared successfully"}
+        supabase_client.table("chats").delete().eq("id", chat_id).execute()
+        return {"message": "Chat deleted successfully"}
         
     except Exception as e:
-        logging.error(f"Error in clear_history endpoint: {str(e)}")
+        logging.error(f"Error in delete_chat endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == '__main__':

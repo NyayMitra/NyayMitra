@@ -1,10 +1,14 @@
 import threading
 import logging
 import os
+import json
 from dotenv import load_dotenv
 from redis_cache import RedisCache
-from chains import get_rag_chain
-from prompts import SYSTEM_PROMPT, USER_PROMPT
+from chains import get_agentic_rag_chain, get_rag_chain
+from supabase_history import SupabaseChatMessageHistory
+import asyncio
+import queue
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,118 +18,140 @@ logging.basicConfig(
 
 class NyayMitra:
     """
-    NyayMitra is a conversational AI interface that leverages a retrieval-augmented generation (RAG) pipeline 
-    to answer user queries based on vector search and LLM responses. It supports Redis-based caching to improve 
-    performance and stores session-based chat histories in memory.
-
-    Attributes:
-        llm: An instance of the language model to use (Google Gemini is used here).
-        embeddings: Embedding model used for vectorization of text (Google Generative AI Embeddings).
-        vector_store: A vector store (ChromaDB) used for semantic retrieval.
-        cache: Instance of RedisCache for caching responses and chat histories.
-
-    Args:
-        llm (BaseLanguageModel): The LLM to generate responses (e.g., ChatGoogleGenerativeAI).
-        embeddings (Embeddings): Embedding model used for vector search (e.g., GoogleGenerativeAIEmbeddings).
-        vector_store (VectorStore): A vector store instance to fetch relevant documents.
-        redis_url (str): Redis connection string. Defaults to "redis://localhost:6379/0".
-
-    Methods:
-        get_session_history(session_id: str) -> RedisChatMessageHistory:
-            Retrieves or initializes the chat history for the given session ID.
-        
-        conversational(query: str, session_id: str) -> Tuple[str, list]:
-            Handles the user query, checks for cached responses, invokes RAG pipeline if necessary,
-            updates history, and returns answer and updated messages.
+    NyayMitra with Persistent Supabase History.
     """
-    store = {}
-    store_lock = threading.Lock()
+    # In-memory cache of history objects to prevent repeated DB fetches per request if object exists
+    _histories = {} 
+    _lock = threading.Lock()
 
-    def __init__(self, llm, embeddings, vector_store, redis_url="redis://localhost:6379/0"):
+    def __init__(self, llm, embeddings, vector_store, supabase_client, redis_url="redis://localhost:6379/0"):
         self.llm = llm
         self.embeddings = embeddings
         self.vector_store = vector_store
+        self.supabase = supabase_client
         self.cache = RedisCache(redis_url)
         logging.info("NyayMitra initialized successfully")
 
     def get_session_history(self, session_id):
-        with NyayMitra.store_lock:
-            if session_id not in NyayMitra.store:
-                NyayMitra.store[session_id] = self.cache.get_chat_history(session_id)
-                logging.info(f"Created new chat history for session_id: {session_id}")
-            else:
-                logging.debug(f"Using existing chat history for session_id: {session_id}")
-        return NyayMitra.store[session_id]
+        # session id here is actually UUID chat id
+        with self._lock:
+            try:
+                # loads messages on init
+                history = SupabaseChatMessageHistory(session_id, self.supabase)
+                return history
+            except Exception as e:
+                logging.error(f"Failed to get history for {session_id}: {e}")
+                return None
 
     def conversational(self, query, session_id):
         """
-        Handles a query from a user within a session:
-        - Uses Redis-based history for retrieval.
-        - Returns cached response if available.
-        - Otherwise, runs full RAG pipeline and updates history.
-
-        Returns:
-            Tuple[str, list]: (LLM answer, updated message list)
+        Handles a query from a user within a session (chat_id).
         """
+        # Cache key still useful for identical repeated queries
         cache_key = self.cache.make_cache_key(query, session_id)
         cached_answer = self.cache.get(cache_key)
-        if cached_answer:
+        
+        history_obj = self.get_session_history(session_id)
+        
+        if cached_answer and history_obj:
             logging.info(f"Cache hit for key: {cache_key}")
-            chat_history = self.get_session_history(session_id).messages
-            return cached_answer, chat_history
+            return cached_answer, history_obj.messages
 
-        logging.info(f"Cache miss for key: {cache_key}. Generating new answer.")
+        logging.info(f"Cache miss for key: {cache_key}. Generating new answer with Agents.")
 
-        rag_chain = get_rag_chain(self.llm, self.vector_store, SYSTEM_PROMPT, USER_PROMPT)
+        rag_chain = get_agentic_rag_chain(self.llm, self.vector_store)
+        
+        if not history_obj:
+             return "Error: Chat session not found.", []
 
-        chat_history_obj = self.get_session_history(session_id)
-        messages = chat_history_obj.messages
+        messages = history_obj.messages
 
         response = rag_chain.invoke(
-            {"input": query, "chat_history": messages},
-            config={"configurable": {"session_id": session_id}},
+            {"input": query, "chat_history": messages}
         )
 
         answer = response['answer']
 
-        # Update chat history
-        chat_history_obj.add_user_message(query)
-        chat_history_obj.add_ai_message(answer)
+        # save to Supabase
+        history_obj.add_user_message(query)
+        history_obj.add_ai_message(answer)
 
-        # Cache the answer
         self.cache.set(cache_key, answer, 300)
 
-        return answer, chat_history_obj.messages
+        return answer, history_obj.messages
+
+
 
     async def conversational_streaming(self, query: str, session_id: str):
         cache_key = self.cache.make_cache_key(query, session_id)
         cached_answer = self.cache.get(cache_key)
         
         if cached_answer:
-            logging.info(f"Cache hit for key: {cache_key}")
-            yield cached_answer
+            yield "data: [DONE]\n\n"
             return
 
-        rag_chain = get_rag_chain(
-            self.llm, self.vector_store, SYSTEM_PROMPT, USER_PROMPT
-        )
+        rag_chain = get_agentic_rag_chain(self.llm, self.vector_store, self.embeddings, self.supabase)
 
-        chat_history_obj = self.get_session_history(session_id)
-        messages = chat_history_obj.messages
+        history_obj = self.get_session_history(session_id)
+        if not history_obj:
+            yield "Error: Could not load chat history."
+            return
 
-        full_response = ""
+        messages = history_obj.messages
+
         try:
-            async for chunk in rag_chain.astream({"input": query, "chat_history": messages}, config={"configurable": {"session_id": session_id}}):
-                if 'answer' in chunk and chunk['answer']:
-                    full_response += chunk['answer']
-                    yield chunk['answer']
+            status_queue = queue.Queue()
+            result_queue = queue.Queue()
+
+            def status_callback(msg):
+                status_queue.put(msg)
+
+            def run_chain():
+                try:
+                    res = rag_chain.invoke(
+                        {"input": query, "chat_history": messages},
+                        status_callback=status_callback
+                    )
+                    result_queue.put(res)
+                except Exception as e:
+                    result_queue.put(e)
+                finally:
+                    status_queue.put(None)
+
+            t = threading.Thread(target=run_chain)
+            t.start()
+
+            while True:
+                try:
+                    #timeout to allow checking other conditions if needed
+                    msg = status_queue.get(timeout=0.1)
+                    
+                    if msg is None:
+                        break
+                    
+                    yield f"data: {json.dumps({'status': msg})}\n\n"
+                    await asyncio.sleep(0.05)
+                    
+                except queue.Empty:
+                    await asyncio.sleep(0.01)
             
-            self.cache.set(cache_key, full_response, 300)
+            t.join()
             
-            # Update history after streaming completes
-            chat_history_obj.add_user_message(query)
-            chat_history_obj.add_ai_message(full_response)
+            final_res = result_queue.get()
+            if isinstance(final_res, Exception):
+                raise final_res
+            
+            answer = final_res['answer']
+            
+            yield f"data: {json.dumps({'content': answer})}\n\n"
+            yield "data: [DONE]\n\n"
+            
+            self.cache.set(cache_key, answer, 300)
+            
+            # Save to Supabase
+            history_obj.add_user_message(query)
+            history_obj.add_ai_message(answer)
             
         except Exception as e:
-            logging.error(f"Streaming error: {str(e)}")
-            yield f"Error: {str(e)}"
+            logging.error(f"Streaming/Agent error: {str(e)}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
