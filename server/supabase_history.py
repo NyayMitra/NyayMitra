@@ -1,4 +1,3 @@
-
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from supabase import Client
@@ -37,7 +36,7 @@ class SupabaseChatMessageHistory(BaseChatMessageHistory):
         except Exception as e:
             logger.error(f"Error loading messages for chat {self.session_id}: {e}")
 
-    def add_user_message(self, message: str):
+    def add_user_message(self, message: HumanMessage | str):
         try:
             self.client.table('messages').insert({
                 "chat_id": self.session_id,
