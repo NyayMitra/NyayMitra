@@ -5,6 +5,8 @@ import ChatPage from "./pages/ChatPage";
 import SignInPage from "./pages/SignInPage";
 import SignUpPage from "./pages/SignUpPage";
 
+console.log("App routes initialized");
+
 const App = () => (
       <BrowserRouter basename="/">
         <Routes>
